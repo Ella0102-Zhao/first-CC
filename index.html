@@ -423,7 +423,7 @@ img { max-width: 100%; }
    ============================================= */
 .budget-summary {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -630,6 +630,47 @@ img { max-width: 100%; }
   font-size: 20px;
   box-shadow: var(--shadow-sm);
 }
+
+/* Style chips */
+.style-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.style-chip {
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 12px; font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition);
+  user-select: none;
+}
+.style-chip:hover { border-color: var(--primary); }
+.style-chip.selected { background: var(--primary-light); color: var(--primary); border-color: var(--primary); }
+
+/* AI generation loading */
+.ai-loading {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 48px 24px; text-align: center;
+}
+.ai-loading .spinner {
+  width: 48px; height: 48px;
+  border: 4px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 16px;
+}
+.ai-loading .status { font-size: 14px; color: var(--text-secondary); }
+.ai-badge {
+  display: inline-block;
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: #fff;
+  font-size: 10px; font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
 </style>
 </head>
 <body>
@@ -659,6 +700,9 @@ img { max-width: 100%; }
     </button>
   </nav>
   <div class="sidebar-footer">
+    <button class="nav-item" onclick="showSettingsModal()">
+      <span class="icon">⚙️</span> API 设置
+    </button>
     <button class="nav-item" onclick="exportData()">
       <span class="icon">📤</span> 导出数据
     </button>
@@ -694,7 +738,8 @@ const STORAGE_KEY = 'travel-planner-pro-v2';
 const defaultState = {
   trips: [],
   activeTripId: null,
-  currentView: 'dashboard'
+  currentView: 'dashboard',
+  llmConfig: { provider: 'deepseek', apiKey: '', model: 'deepseek-chat' }
 };
 
 function loadState() {
@@ -717,6 +762,15 @@ let state = loadState();
 
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function getLlmConfig() {
+  return state.llmConfig || { provider: 'deepseek', apiKey: '', model: 'deepseek-chat' };
+}
+
+function saveLlmConfig(config) {
+  state.llmConfig = { ...state.llmConfig, ...config };
+  saveState();
 }
 
 function getActiveTrip() {
@@ -914,6 +968,8 @@ function createTrip(data) {
     travelers: Number(data.travelers) || 1,
     notes: data.notes || '',
     tripType: data.tripType || 'city',
+    budgetType: data.budgetType || 'personal',
+    travelStyles: data.travelStyles || [],
     colorIndex: state.trips.length,
     itinerary: {},
     expenses: [],
@@ -939,6 +995,8 @@ function updateTrip(tripId, data) {
   trip.travelers = Number(data.travelers) || 1;
   trip.notes = data.notes || '';
   trip.tripType = data.tripType || trip.tripType;
+  trip.budgetType = data.budgetType || trip.budgetType || 'personal';
+  trip.travelStyles = data.travelStyles || trip.travelStyles || [];
   const newDays = daysBetween(trip.startDate, trip.endDate);
   const oldDays = Object.keys(trip.itinerary).length;
   if (newDays > oldDays) {
@@ -1078,6 +1136,27 @@ function getPackingStats(trip) {
    ============================================= */
 function showFieldError(id, msg) { const el = document.getElementById(id); if (el) { el.textContent = msg; el.style.display = 'block'; } }
 
+/* Travel style options */
+const TRAVEL_STYLES = [
+  { key: 'food', icon: '🍽️', label: '美食之旅' },
+  { key: 'photography', icon: '📸', label: '摄影打卡' },
+  { key: 'shopping', icon: '🛍️', label: '购物血拼' },
+  { key: 'culture', icon: '🏛️', label: '历史文化' },
+  { key: 'nature', icon: '🌿', label: '自然风光' },
+  { key: 'adventure', icon: '🏃', label: '户外探险' },
+  { key: 'relaxation', icon: '💆', label: '休闲放松' },
+  { key: 'nightlife', icon: '🌃', label: '夜生活' },
+  { key: 'family', icon: '👨‍👩‍👧', label: '亲子旅行' },
+];
+
+function renderStyleChips(selectedStyles) {
+  return TRAVEL_STYLES.map(s =>
+    `<span class="style-chip${selectedStyles.includes(s.key) ? ' selected' : ''}" data-style="${s.key}" onclick="event.stopPropagation();this.classList.toggle('selected')">${s.icon} ${s.label}</span>`
+  ).join('');
+}
+
+function styleLabel(key) { const s = TRAVEL_STYLES.find(t => t.key === key); return s ? s.icon + ' ' + s.label : key; }
+
 function showTripForm(trip = null) {
   const isEdit = !!trip;
   const data = trip || { name: '', country: '', startDate: '', endDate: '', budget: '', travelers: '1', notes: '', tripType: 'city' };
@@ -1095,6 +1174,12 @@ function showTripForm(trip = null) {
       <div class="form-group"><label class="form-label">预算 (¥)</label><input class="form-input" type="number" id="tf-budget" value="${data.budget}" placeholder="0" min="0"></div>
       <div class="form-group"><label class="form-label">旅行人数</label><input class="form-input" type="number" id="tf-travelers" value="${data.travelers}" min="1" max="50"></div>
     </div>
+    <div class="form-group"><label class="form-label">预算类型</label>
+      <select class="form-select" id="tf-budget-type">
+        <option value="personal" ${data.budgetType !== 'team' ? 'selected' : ''}>👤 个人预算（每人 ¥ × 人数 = 总预算）</option>
+        <option value="team" ${data.budgetType === 'team' ? 'selected' : ''}>👥 团队预算（所有人合计的总预算）</option>
+      </select>
+    </div>
     <div class="form-group"><label class="form-label">旅行类型</label>
       <select class="form-select" id="tf-type">
         <option value="city" ${data.tripType === 'city' ? 'selected' : ''}>🏙️ 城市观光</option>
@@ -1102,6 +1187,11 @@ function showTripForm(trip = null) {
         <option value="mountain" ${data.tripType === 'mountain' ? 'selected' : ''}>🏔️ 户外探险</option>
         <option value="business" ${data.tripType === 'business' ? 'selected' : ''}>💼 商务出行</option>
       </select>
+    </div>
+    <div class="form-group"><label class="form-label">旅行风格偏好（可多选）</label>
+      <div class="style-chips" id="tf-styles">
+        ${renderStyleChips(data.travelStyles || [])}
+      </div>
     </div>
     <div class="form-group"><label class="form-label">备注</label><textarea class="form-textarea" id="tf-notes" placeholder="添加备注...">${escHtml(data.notes)}</textarea></div>
     <div id="tf-error" class="form-error" style="display:none"></div>`,
@@ -1123,6 +1213,8 @@ function showTripForm(trip = null) {
         travelers: document.getElementById('tf-travelers').value,
         notes: document.getElementById('tf-notes').value,
         tripType: document.getElementById('tf-type').value,
+        budgetType: document.getElementById('tf-budget-type').value,
+        travelStyles: Array.from(document.querySelectorAll('#tf-styles .style-chip.selected')).map(el => el.dataset.style),
       };
       if (isEdit) { updateTrip(trip.id, formData); showToast('✅ 旅行计划已更新'); }
       else { createTrip(formData); showToast('🎉 旅行计划已创建！'); }
@@ -1204,6 +1296,299 @@ function showAddPackingItem(tripId, category) {
       addPackingItem(tripId, category, name); closeModal(); render(); showToast('✅ 物品已添加');
     });
   }, 50);
+}
+
+/* =============================================
+   LLM API SETTINGS
+   ============================================= */
+function showSettingsModal() {
+  const config = getLlmConfig();
+  const providerModels = { deepseek: 'deepseek-chat', anthropic: 'claude-sonnet-5-20251001', openai: 'gpt-4o' };
+  const providerPlaceholders = { deepseek: 'sk-...', anthropic: 'sk-ant-...', openai: 'sk-...' };
+  showModal('⚙️ API 设置',
+    `<div class="form-group"><label class="form-label">AI 服务商</label>
+      <select class="form-select" id="sm-provider" onchange="document.getElementById('sm-model').placeholder=this.options[this.selectedIndex].dataset.model||''">
+        <option value="deepseek" ${config.provider === 'deepseek' ? 'selected' : ''} data-model="deepseek-chat">🚀 DeepSeek（免费注册即可使用）</option>
+        <option value="anthropic" ${config.provider === 'anthropic' ? 'selected' : ''} data-model="claude-sonnet-5-20251001">Anthropic (Claude)</option>
+        <option value="openai" ${config.provider === 'openai' ? 'selected' : ''} data-model="gpt-4o">OpenAI (GPT)</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">API Key</label>
+      <input class="form-input" type="password" id="sm-api-key" value="${escHtml(config.apiKey || '')}" placeholder="${providerPlaceholders[config.provider] || 'sk-...'}">
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+        ${config.provider === 'deepseek' || !config.provider ? '💡 DeepSeek 免费注册即送额度，<a href="https://platform.deepseek.com" target="_blank">点此注册 →</a>' : 'API Key 仅保存在浏览器本地，不会上传到任何服务器'}
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">模型名称</label>
+      <input class="form-input" id="sm-model" value="${escHtml(config.model || '')}" placeholder="${providerModels[config.provider] || 'deepseek-chat'}">
+    </div>
+    <div id="sm-error" class="form-error" style="display:none"></div>`,
+    `<button class="btn btn-secondary" onclick="closeModal()">取消</button>
+     <button class="btn btn-info" id="sm-clear">清除设置</button>
+     <button class="btn btn-primary" id="sm-submit">💾 保存设置</button>`
+  );
+  setTimeout(() => {
+    document.getElementById('sm-submit').addEventListener('click', () => {
+      const apiKey = document.getElementById('sm-api-key').value.trim();
+      if (!apiKey) { document.getElementById('sm-error').textContent = '请输入 API Key'; document.getElementById('sm-error').style.display = 'block'; return; }
+      const provider = document.getElementById('sm-provider').value;
+      saveLlmConfig({
+        provider: provider,
+        apiKey: apiKey,
+        model: document.getElementById('sm-model').value.trim() || (providerModels[provider] || 'deepseek-chat'),
+      });
+      closeModal(); showToast('✅ API 设置已保存');
+    });
+    document.getElementById('sm-clear').addEventListener('click', () => {
+      saveLlmConfig({ provider: 'deepseek', apiKey: '', model: 'deepseek-chat' });
+      closeModal(); showToast('🗑️ API 设置已清除');
+    });
+  }, 50);
+}
+
+/* =============================================
+   AI TRAVEL PLAN GENERATION
+   ============================================= */
+async function generateAIPlan(trip, onStatus) {
+  const config = getLlmConfig();
+  if (!config.apiKey) {
+    showToast('⚠️ 请先在侧边栏设置 API Key');
+    showSettingsModal();
+    return;
+  }
+
+  const days = Object.keys(trip.itinerary).length;
+  const styleText = (trip.travelStyles || []).length > 0
+    ? (trip.travelStyles || []).map(k => styleLabel(k)).join('、')
+    : '综合体验';
+  const budgetTypeText = (trip.budgetType || 'personal') === 'personal'
+    ? `个人预算每人 ¥${trip.budget || 0}（共 ${trip.travelers} 人）`
+    : `团队总预算 ¥${trip.budget || 0}（共 ${trip.travelers} 人，人均 ¥${trip.travelers > 0 ? Math.round((trip.budget || 0) / trip.travelers) : 0}）`;
+
+  const tripTypeLabels = { city: '城市观光', beach: '海滩度假', mountain: '户外探险', business: '商务出行' };
+
+  const prompt = `你是一位资深的旅行规划专家。请为以下旅行制定一份极其详细的每日计划。
+
+【基本信息】
+- 目的地：${trip.name}${trip.country ? '，' + trip.country : ''}
+- 日期：${trip.startDate} 至 ${trip.endDate}（共 ${days} 天）
+- 人数：${trip.travelers} 人
+- 预算：${budgetTypeText}
+- 旅行类型：${tripTypeLabels[trip.tripType] || trip.tripType}
+- 旅行风格偏好：${styleText}
+
+【要求】
+1. 每天的计划要具体到：具体的景点名称、具体的餐厅名称（含推荐菜品）、具体的活动
+2. 每天分上午(09:00)、中午(12:00)、下午(14:00)、晚上(18:00)四个时段
+3. 每个活动写明具体地点和预估费用(人民币)
+4. 活动类型用英文：attraction(景点), food(餐饮), transport(交通), hotel(住宿), photo(拍照), shopping(购物), other(其他)
+5. 所有景点、餐厅、活动名称必须真实存在，不要编造
+6. 根据旅行风格偏好调整侧重方向
+7. 每天总费用控制在预算范围内
+
+请严格按照以下JSON格式返回，不要添加任何其他文字：
+\`\`\`json
+{
+  "days": [
+    {
+      "day": "Day 1",
+      "summary": "第一天概要（一句话）",
+      "activities": [
+        {"time": "09:00", "title": "具体景点/餐厅名称", "type": "attraction", "location": "具体地址或区域", "description": "简短介绍和游玩建议", "cost": 100}
+      ]
+    }
+  ]
+}
+\`\`\``;
+
+  if (onStatus) onStatus('正在连接 AI 服务...');
+
+  try {
+    let apiUrl, headers, body;
+
+    if (config.provider === 'anthropic') {
+      apiUrl = 'https://api.anthropic.com/v1/messages';
+      headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      };
+      body = JSON.stringify({
+        model: config.model || 'claude-sonnet-5-20251001',
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: prompt }],
+      });
+    } else if (config.provider === 'deepseek') {
+      apiUrl = 'https://api.deepseek.com/v1/chat/completions';
+      headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey}`,
+      };
+      body = JSON.stringify({
+        model: config.model || 'deepseek-chat',
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: prompt }],
+      });
+    } else {
+      apiUrl = 'https://api.openai.com/v1/chat/completions';
+      headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey}`,
+      };
+      body = JSON.stringify({
+        model: config.model || 'gpt-4o',
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: prompt }],
+      });
+    }
+
+    if (onStatus) onStatus('AI 正在规划行程...');
+
+    const res = await fetch(apiUrl, { method: 'POST', headers, body });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`API 请求失败 (${res.status}): ${errText.slice(0, 200)}`);
+    }
+
+    const data = await res.json();
+
+    if (onStatus) onStatus('正在解析行程计划...');
+
+    // Parse response
+    let content;
+    if (config.provider === 'anthropic') {
+      content = data.content?.[0]?.text || '';
+    } else {
+      content = data.choices?.[0]?.message?.content || '';
+    }
+
+    // Extract JSON from markdown code blocks
+    const jsonMatch = content.match(/```json\s*([\s\S]*?)```/) || content.match(/```\s*([\s\S]*?)```/);
+    const jsonStr = jsonMatch ? jsonMatch[1].trim() : content.trim();
+
+    let plan;
+    try {
+      plan = JSON.parse(jsonStr);
+    } catch (e) {
+      // Try to find JSON object
+      const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+      if (objMatch) plan = JSON.parse(objMatch[0]);
+      else throw new Error('无法解析 AI 返回的计划');
+    }
+
+    if (!plan.days || !Array.isArray(plan.days)) {
+      throw new Error('AI 返回格式不正确，缺少 days 数组');
+    }
+
+    // Import the plan into the trip itinerary
+    let importedCount = 0;
+    plan.days.forEach(dayPlan => {
+      const dayKey = dayPlan.day;
+      if (!trip.itinerary[dayKey]) {
+        // Try matching by index
+        const dayKeys = Object.keys(trip.itinerary).sort();
+        const idx = parseInt(dayKey.replace('Day ', '')) - 1;
+        if (idx >= 0 && idx < dayKeys.length) {
+          trip.itinerary[dayKeys[idx]] = [];
+          dayPlan.activities.forEach(a => {
+            trip.itinerary[dayKeys[idx]].push({
+              id: genActId(),
+              time: a.time || '',
+              title: a.title || '',
+              description: a.description || '',
+              location: a.location || '',
+              cost: Number(a.cost) || 0,
+              type: a.type || 'other',
+              aiGenerated: true,
+            });
+            importedCount++;
+          });
+        }
+      } else {
+        trip.itinerary[dayKey] = [];
+        dayPlan.activities.forEach(a => {
+          trip.itinerary[dayKey].push({
+            id: genActId(),
+            time: a.time || '',
+            title: a.title || '',
+            description: a.description || '',
+            location: a.location || '',
+            cost: Number(a.cost) || 0,
+            type: a.type || 'other',
+            aiGenerated: true,
+          });
+          importedCount++;
+        });
+      }
+    });
+
+    saveState();
+    if (onStatus) onStatus(`✅ 完成！共生成 ${importedCount} 个活动`);
+    return { success: true, count: importedCount, plan };
+  } catch (e) {
+    console.error('AI generation error:', e);
+    showToast(`❌ AI 生成失败：${e.message}`);
+    return { success: false, error: e.message };
+  }
+}
+
+async function generateAIPlanForTrip(tripId) {
+  const trip = state.trips.find(t => t.id === tripId);
+  if (!trip) return;
+
+  const config = getLlmConfig();
+  if (!config.apiKey) {
+    showToast('⚠️ 请先在侧边栏设置 API Key');
+    showSettingsModal();
+    return;
+  }
+
+  // Clear existing itinerary
+  const days = Object.keys(trip.itinerary);
+  days.forEach(d => { trip.itinerary[d] = []; });
+  saveState();
+
+  // Show loading modal
+  showModal('🤖 AI 生成旅行计划',
+    `<div class="ai-loading">
+      <div class="spinner"></div>
+      <div class="status" id="ai-status">正在连接 AI 服务...</div>
+    </div>`, '');
+
+  const updateStatus = (msg) => {
+    const el = document.getElementById('ai-status');
+    if (el) el.textContent = msg;
+  };
+
+  const result = await generateAIPlan(trip, updateStatus);
+
+  if (result.success) {
+    closeModal();
+    showToast(`✅ AI 已生成 ${result.count} 个详细活动计划！`);
+    state.currentView = 'itinerary';
+    saveState();
+    render();
+  } else {
+    // Keep modal open with error
+    document.getElementById('modal-container').innerHTML = `
+      <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+        <div class="modal">
+          <div class="modal-header">
+            <h2>❌ 生成失败</h2>
+            <button class="btn btn-icon btn-secondary" onclick="closeModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            <p style="color:var(--danger);margin-bottom:12px">${escHtml(result.error || '未知错误')}</p>
+            <p style="font-size:13px;color:var(--text-secondary)">请检查 API Key 是否正确，或稍后重试。</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal()">关闭</button>
+            <button class="btn btn-info" onclick="closeModal();showSettingsModal()">⚙️ 检查设置</button>
+          </div>
+        </div>
+      </div>`;
+  }
 }
 
 /* =============================================
@@ -1350,17 +1735,87 @@ async function fetchWikipediaSummary(query, lang = 'zh') {
 }
 
 /* =============================================
-   WEATHER FORECAST (Open-Meteo — Free, no API key)
+   WEATHER FORECAST (weather.com.cn + Open-Meteo fallback)
    ============================================= */
 const weatherCache = {};
 
-// Geocoding first, then weather
-async function fetchWeather(locationName, startDate, endDate) {
-  const cacheKey = `weather_${locationName}_${startDate}_${endDate}`;
-  if (weatherCache[cacheKey]) return weatherCache[cacheKey];
+const WEATHER_CN_CITY_CODES = {
+  '北京': '101010100', '上海': '101020100', '广州': '101280101', '深圳': '101280601',
+  '杭州': '101210101', '成都': '101270101', '南京': '101190101', '武汉': '101200101',
+  '西安': '101110101', '重庆': '101040100', '长沙': '101250101', '厦门': '101230201',
+  '青岛': '101120201', '大连': '101070201', '三亚': '101310201', '昆明': '101290101',
+  '天津': '101030100', '苏州': '101190401', '桂林': '101300501', '丽江': '101291401',
+  '拉萨': '101140101', '哈尔滨': '101050101', '沈阳': '101070101', '郑州': '101180101',
+  '济南': '101120101', '合肥': '101220101', '福州': '101230101', '贵阳': '101260101',
+  '南宁': '101300101', '南昌': '101240101', '海口': '101310101', '乌鲁木齐': '101130101',
+  '东京': 'tokyo', '大阪': 'osaka', '京都': 'kyoto', '首尔': 'seoul',
+  '曼谷': 'bangkok', '新加坡': 'singapore', '巴黎': 'paris', '伦敦': 'london',
+  '纽约': 'newyork', '悉尼': 'sydney', '罗马': 'rome', '巴厘岛': 'bali',
+  '香港': '101320101', '澳门': '101330101', '台北': '101340101',
+};
+
+function findCityCode(locationName) {
+  if (WEATHER_CN_CITY_CODES[locationName]) return WEATHER_CN_CITY_CODES[locationName];
+  for (const [key, val] of Object.entries(WEATHER_CN_CITY_CODES)) {
+    if (locationName.includes(key) || key.includes(locationName)) return val;
+  }
+  return null;
+}
+
+async function fetchWeatherCN(locationName) {
+  const cityCode = findCityCode(locationName);
+  if (!cityCode || cityCode.length < 8) return null; // Only numeric codes work with weather.com.cn
 
   try {
-    // Step 1: Geocode the location
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const url = `https://www.weather.com.cn/weather1d/${cityCode}.shtml`;
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    // Parse HTML to extract weather data
+    const forecast = [];
+    const tempRegex = /<span class="tem">([^<]+)<\/span>/g;
+    const weaRegex = /<span class="wea">([^<]+)<\/span>/g;
+    const winRegex = /<span class="win">[^<]*<span[^>]*>([^<]+)<\/span>/g;
+
+    // Simple parsing of weather.com.cn 7-day forecast table
+    const dateRegex = /<h1>(\d+日[^<]*)<\/h1>/g;
+    const rowRegex = /<tr[^>]*class="lv[^"]*"[^>]*>([\s\S]*?)<\/tr>/g;
+    const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
+
+    const tableMatch = html.match(/<table[^>]*class="table[^"]*"[^>]*>([\s\S]*?)<\/table>/);
+    if (tableMatch) {
+      const rows = tableMatch[1].match(/<tr[^>]*>[\s\S]*?<\/tr>/g) || [];
+      for (const row of rows.slice(1, 8)) { // skip header, max 7 days
+        const cells = row.match(/<td[^>]*>[\s\S]*?<\/td>/g) || [];
+        if (cells.length >= 5) {
+          const dateText = cells[0].replace(/<[^>]+>/g, '').trim();
+          const weatherText = cells[1].replace(/<[^>]+>/g, '').trim();
+          const tempHigh = cells[2].replace(/<[^>]+>/g, '').trim();
+          const tempLow = cells[4].replace(/<[^>]+>/g, '').trim();
+          forecast.push({
+            date: dateText,
+            weather: weatherText,
+            tempMax: parseInt(tempHigh) || 0,
+            tempMin: parseInt(tempLow) || 0,
+          });
+        }
+      }
+      if (forecast.length > 0) {
+        return { source: 'weather.com.cn', forecast };
+      }
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchWeatherOpenMeteo(locationName, startDate, endDate) {
+  try {
     const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(locationName)}&count=1&language=zh`;
     const geoRes = await fetch(geoUrl);
     if (!geoRes.ok) return null;
@@ -1368,11 +1823,7 @@ async function fetchWeather(locationName, startDate, endDate) {
     if (!geoData.results || geoData.results.length === 0) return null;
     const loc = geoData.results[0];
 
-    // Step 2: Get weather for the date range
     const days = daysBetween(startDate, endDate);
-    const today = new Date().toISOString().slice(0, 10);
-
-    // Open-Meteo can only forecast ~16 days ahead. For past dates or far future, we show climate averages.
     const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weathercode&timezone=auto&forecast_days=${Math.min(days + 3, 16)}`;
     const weatherRes = await fetch(weatherUrl);
     if (!weatherRes.ok) return null;
@@ -1397,17 +1848,54 @@ async function fetchWeather(locationName, startDate, endDate) {
       });
     }
 
-    const result = {
+    return {
+      source: 'open-meteo',
       location: `${loc.name}${loc.country ? ', ' + loc.country : ''}`,
       forecast,
       lat: loc.latitude,
       lon: loc.longitude,
     };
-    weatherCache[cacheKey] = result;
-    return result;
   } catch (e) {
     return null;
   }
+}
+
+async function fetchWeather(locationName, startDate, endDate) {
+  const cacheKey = `weather_${locationName}_${startDate}_${endDate}`;
+  if (weatherCache[cacheKey]) return weatherCache[cacheKey];
+
+  // Try weather.com.cn first
+  const cnResult = await fetchWeatherCN(locationName);
+  if (cnResult && cnResult.forecast && cnResult.forecast.length > 0) {
+    const formattedForecast = cnResult.forecast.slice(0, 10).map((d, i) => {
+      const date = new Date(startDate + 'T00:00:00');
+      date.setDate(date.getDate() + i);
+      return {
+        date: date.toISOString().slice(0, 10),
+        tempMax: d.tempMax,
+        tempMin: d.tempMin,
+        rainProb: 0,
+        icon: d.weather || '🌡️',
+      };
+    });
+    const result = {
+      location: locationName,
+      source: 'weather.com.cn',
+      forecast: formattedForecast,
+    };
+    weatherCache[cacheKey] = result;
+    return result;
+  }
+
+  // Fallback to Open-Meteo
+  const omResult = await fetchWeatherOpenMeteo(locationName, startDate, endDate);
+  if (omResult) {
+    weatherCache[cacheKey] = omResult;
+    return omResult;
+  }
+
+  // Both failed — return the special error message
+  return { error: true, message: '神机妙算失效了，过几天再来看看吧' };
 }
 
 /* =============================================
@@ -1591,12 +2079,15 @@ function renderDashboard(main) {
   // For each trip, try to load a hero photo asynchronously
   const tripCardsHtml = state.trips.map((trip, i) => {
     const totalSpent = getTotalSpent(trip);
-    const budgetUsage = trip.budget > 0 ? Math.round((totalSpent / trip.budget) * 100) : 0;
+    const isPersonal = (trip.budgetType || 'personal') === 'personal';
+    const actualTotal = isPersonal ? (trip.budget || 0) * (trip.travelers || 1) : (trip.budget || 0);
+    const perPerson = isPersonal ? (trip.budget || 0) : Math.round((trip.budget || 0) / (trip.travelers || 1));
+    const budgetUsage = actualTotal > 0 ? Math.round((totalSpent / actualTotal) * 100) : 0;
     const days = Object.keys(trip.itinerary).length;
     const activityCount = Object.values(trip.itinerary).reduce((sum, acts) => sum + acts.length, 0);
     const packing = getPackingStats(trip);
-    return { trip, i, totalSpent, budgetUsage, days, activityCount, packing };
-  }).map(({ trip, i, totalSpent, budgetUsage, days, activityCount, packing }) => `
+    return { trip, i, totalSpent, budgetUsage, days, activityCount, packing, isPersonal, actualTotal, perPerson };
+  }).map(({ trip, i, totalSpent, budgetUsage, days, activityCount, packing, isPersonal, actualTotal, perPerson }) => `
     <div class="card trip-card" onclick="selectTrip('${trip.id}')" id="trip-card-${trip.id}">
       <div class="trip-card-header" id="trip-card-bg-${trip.id}" style="background:${tripColor(i)};background-size:cover;background-position:center">
         <div class="trip-card-badge">${days} 天</div>
@@ -1611,7 +2102,7 @@ function renderDashboard(main) {
         <div class="trip-card-meta">
           <span>📋 ${activityCount} 个活动</span>
           <span>👥 ${trip.travelers} 人</span>
-          <span>💰 ${trip.budget > 0 ? formatCurrency(totalSpent) + ' / ' + formatCurrency(trip.budget) : formatCurrency(totalSpent)}</span>
+          <span>💰 ${isPersonal ? formatCurrency(perPerson) + '/人' : formatCurrency(actualTotal)}${totalSpent > 0 ? ' · 已花 ' + formatCurrency(totalSpent) : ''}</span>
           <span>🎒 ${packing.pct}%</span>
         </div>
         ${trip.budget > 0 ? `<div class="progress-bar" style="margin-top:12px"><div class="progress-fill ${budgetUsage > 100 ? 'danger' : budgetUsage > 80 ? 'warning' : 'safe'}" style="width:${Math.min(budgetUsage, 100)}%"></div></div>` : ''}
@@ -1735,14 +2226,28 @@ async function renderExplore(main, trip) {
     </div>` : '';
 
   // Weather
-  const weatherHtml = weather ? `
+  let weatherSourceNote = '';
+  const weatherHtml = (() => {
+    if (!weather) {
+      return '<div class="explore-section"><p style="color:var(--text-muted)">无法获取天气数据</p></div>';
+    }
+    if (weather.error) {
+      return `<div class="explore-section"><div class="info-card" style="text-align:center;padding:32px">
+        <div style="font-size:48px;margin-bottom:12px">🔮</div>
+        <p style="font-size:16px;font-weight:600;color:var(--text)">${escHtml(weather.message)}</p>
+      </div></div>`;
+    }
+    if (weather.source === 'weather.com.cn') {
+      weatherSourceNote = '<div style="font-size:10px;color:var(--text-muted);margin-top:4px">数据来源：中国天气网 weather.com.cn</div>';
+    }
+    return `
     <div class="explore-section">
-      <h2>🌤️ 天气预报 · ${escHtml(weather.location)}</h2>
+      <h2>🌤️ 天气预报 · ${escHtml(weather.location || trip.name)}</h2>
       <div class="weather-grid">
         ${weather.forecast.slice(0, Math.min(days, 10)).map(d => `
           <div class="weather-day">
             <div class="day">${d.date.slice(5)}</div>
-            <div class="icon">${d.icon}</div>
+            <div class="icon">${d.icon && d.icon.length <= 3 ? d.icon : (d.weather || d.icon || '🌡️')}</div>
             <div class="temp">${d.tempMax}°</div>
             <div class="temp-lo">${d.tempMin}°</div>
             ${d.rainProb > 30 ? `<div style="font-size:10px;color:var(--info)">💧${d.rainProb}%</div>` : ''}
@@ -1750,7 +2255,9 @@ async function renderExplore(main, trip) {
         `).join('')}
       </div>
       ${weather.forecast.length === 0 ? '<p style="color:var(--text-muted);font-size:13px">出发日期临近时将显示详细预报</p>' : ''}
-    </div>` : '<div class="explore-section"><p style="color:var(--text-muted)">无法获取天气数据</p></div>';
+      ${weatherSourceNote}
+    </div>`;
+  })();
 
   // Attractions
   const attractionsHtml = guide.attractions.length > 0 ? `
@@ -1803,23 +2310,38 @@ async function renderExplore(main, trip) {
     </div>` : '';
 
   // Budget summary
+  const isPersonal = (trip.budgetType || 'personal') === 'personal';
+  const actualTotal = isPersonal ? (trip.budget || 0) * (trip.travelers || 1) : (trip.budget || 0);
+  const perPerson = isPersonal ? (trip.budget || 0) : Math.round((trip.budget || 0) / (trip.travelers || 1));
+  const budgetTypeLabel = isPersonal ? '👤 个人预算' : '👥 团队预算';
   const budgetHtml = trip.budget > 0 ? `
     <div class="explore-section">
-      <h2>💰 预算概览</h2>
+      <h2>💰 预算概览 · ${budgetTypeLabel}</h2>
       <div class="budget-summary">
         <div class="budget-stat">
-          <div class="label">总预算</div>
+          <div class="label">${isPersonal ? '每人预算' : '总预算'}</div>
           <div class="value">${formatCurrency(trip.budget)}</div>
+          ${isPersonal ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">× ${trip.travelers} 人</div>` : ''}
         </div>
         <div class="budget-stat">
-          <div class="label">已花费</div>
-          <div class="value">${formatCurrency(totalSpent)}</div>
-          <div class="progress-bar"><div class="progress-fill ${totalSpent/trip.budget > 1 ? 'danger' : totalSpent/trip.budget > 0.8 ? 'warning' : 'safe'}" style="width:${Math.min(totalSpent/trip.budget*100,100)}%"></div></div>
+          <div class="label">${isPersonal ? '总预算' : '已花费'}</div>
+          <div class="value">${isPersonal ? formatCurrency(actualTotal) : formatCurrency(totalSpent)}</div>
+          ${!isPersonal ? `<div class="progress-bar"><div class="progress-fill ${totalSpent/trip.budget > 1 ? 'danger' : totalSpent/trip.budget > 0.8 ? 'warning' : 'safe'}" style="width:${Math.min(totalSpent/trip.budget*100,100)}%"></div></div>` : ''}
         </div>
         <div class="budget-stat">
-          <div class="label">人均预算</div>
-          <div class="value">${formatCurrency(Math.round(trip.budget / trip.travelers))}</div>
+          <div class="label">人均</div>
+          <div class="value">${formatCurrency(perPerson)}</div>
         </div>
+      </div>
+    </div>` : '';
+
+  // Travel styles display
+  const styles = trip.travelStyles || [];
+  const stylesHtml = styles.length > 0 ? `
+    <div class="explore-section">
+      <h2>🎯 旅行风格</h2>
+      <div class="style-chips">
+        ${styles.map(s => `<span class="style-chip selected" style="cursor:default">${styleLabel(s)}</span>`).join('')}
       </div>
     </div>` : '';
 
@@ -1831,11 +2353,13 @@ async function renderExplore(main, trip) {
         <p class="page-subtitle">${escHtml(trip.country || '')} · ${days} 天 · ${trip.travelers} 人 · ${guide.attractions.length} 个景点推荐</p>
       </div>
       <div style="display:flex;gap:8px">
-        <button class="btn btn-info" onclick="refreshExplore()">🔄 刷新信息</button>
+        <button class="btn btn-info" onclick="generateAIPlanForTrip('${trip.id}')">🤖 AI 生成计划</button>
+        <button class="btn btn-secondary" onclick="refreshExplore()">🔄 刷新信息</button>
       </div>
     </div>
     ${heroHtml}
     ${photoGridHtml}
+    ${stylesHtml}
     ${wikiHtml}
     ${weatherHtml}
     ${attractionsHtml}
@@ -1939,7 +2463,7 @@ function renderItinerary(main, trip) {
           <div class="activity-type">${actTypeIcon(act.type)}</div>
           ${act.time ? `<div class="activity-time">${act.time}</div>` : ''}
           <div class="activity-info">
-            <h4>${escHtml(act.title)}</h4>
+            <h4>${escHtml(act.title)}${act.aiGenerated ? '<span class="ai-badge">🤖 AI推荐</span>' : ''}</h4>
             ${act.description ? `<p>${escHtml(act.description)}</p>` : ''}
             ${act.location ? `<div class="location">📍 ${escHtml(act.location)}</div>` : ''}
           </div>
@@ -1964,7 +2488,10 @@ function renderItinerary(main, trip) {
         <h1 class="page-title">${escHtml(trip.name)} · 行程</h1>
         <p class="page-subtitle">${days.length} 天 · ${totalActivities} 个活动${totalItinCost > 0 ? ` · 预估 ${formatCurrency(totalItinCost)}` : ''}</p>
       </div>
-      <button class="btn btn-primary" onclick="showActivityForm('${trip.id}','${activeDay}')">➕ 添加活动</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-info" onclick="generateAIPlanForTrip('${trip.id}')">🤖 AI 生成计划</button>
+        <button class="btn btn-primary" onclick="showActivityForm('${trip.id}','${activeDay}')">➕ 添加活动</button>
+      </div>
     </div>
     <div class="card" style="padding:16px 20px">
       <div class="tabs">${tabs}</div>
@@ -2000,12 +2527,16 @@ function renderBudget(main, trip) {
   const totalSpent = getTotalSpent(trip);
   const itinCost = getItineraryCost(trip);
   const expTotal = trip.expenses.reduce((sum, e) => sum + e.amount, 0);
-  const budgetUsage = trip.budget > 0 ? Math.round((totalSpent / trip.budget) * 100) : 0;
-  const remaining = trip.budget - totalSpent;
+  const isPersonal = (trip.budgetType || 'personal') === 'personal';
+  const actualTotal = isPersonal ? (trip.budget || 0) * (trip.travelers || 1) : (trip.budget || 0);
+  const perPerson = isPersonal ? (trip.budget || 0) : Math.round((trip.budget || 0) / (trip.travelers || 1));
+  const budgetUsage = actualTotal > 0 ? Math.round((totalSpent / actualTotal) * 100) : 0;
+  const remaining = actualTotal - totalSpent;
+  const budgetTypeLabel = isPersonal ? '👤 个人预算' : '👥 团队预算';
 
   const categoryRows = EXPENSE_CATEGORIES.map(cat => {
     const spent = getCategoryTotal(trip, cat);
-    const pct = trip.budget > 0 ? Math.round((spent / trip.budget) * 100) : 0;
+    const pct = actualTotal > 0 ? Math.round((spent / actualTotal) * 100) : 0;
     return `
       <div class="category-row">
         <div class="category-icon">${CATEGORY_LABELS[cat].split(' ')[0]}</div>
@@ -2035,12 +2566,20 @@ function renderBudget(main, trip) {
       <div>
         <button class="btn btn-sm btn-secondary" onclick="state.currentView='dashboard';render()" style="margin-bottom:8px">← 返回</button>
         <h1 class="page-title">${escHtml(trip.name)} · 预算</h1>
-        <p class="page-subtitle">总预算 ${formatCurrency(trip.budget)}</p>
+        <p class="page-subtitle">${budgetTypeLabel} · ${trip.travelers} 人</p>
       </div>
       <button class="btn btn-primary" onclick="showExpenseForm('${trip.id}')">💸 添加支出</button>
     </div>
     <div class="budget-summary">
-      <div class="budget-stat"><div class="label">总预算</div><div class="value">${formatCurrency(trip.budget)}</div></div>
+      <div class="budget-stat">
+        <div class="label">${isPersonal ? '每人预算' : '总预算'}</div>
+        <div class="value">${formatCurrency(trip.budget)}</div>
+        ${isPersonal ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">× ${trip.travelers} 人</div>` : ''}
+      </div>
+      <div class="budget-stat">
+        <div class="label">${isPersonal ? '总预算' : '人均预算'}</div>
+        <div class="value">${isPersonal ? formatCurrency(actualTotal) : formatCurrency(perPerson)}</div>
+      </div>
       <div class="budget-stat">
         <div class="label">已花费</div>
         <div class="value ${remaining < 0 ? 'over' : ''}">${formatCurrency(totalSpent)}</div>
