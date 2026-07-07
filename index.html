@@ -701,13 +701,16 @@ img { max-width: 100%; }
   </nav>
   <div class="sidebar-footer">
     <button class="nav-item" onclick="showSettingsModal()">
-      <span class="icon">⚙️</span> API 设置
+      <span class="icon">⚙️</span> 设置
     </button>
     <button class="nav-item" onclick="exportData()">
       <span class="icon">📤</span> 导出数据
     </button>
     <button class="nav-item" onclick="importData()">
       <span class="icon">📥</span> 导入数据
+    </button>
+    <button class="nav-item" onclick="showSyncModal()" style="color:var(--info);font-weight:600">
+      <span class="icon">☁️</span> 云端同步
     </button>
   </div>
   <div class="sidebar-tip" id="sidebar-tip">
@@ -952,6 +955,223 @@ function handleImportFile(event) {
   };
   reader.readAsText(file);
   event.target.value = '';
+}
+
+/* =============================================
+   CLOUD SYNC — GitHub-based collaboration
+   ============================================= */
+const SYNC_CONFIG = {
+  owner: 'Ella0102-Zhao',
+  repo: 'first-CC',
+  branch: 'main',
+  filePath: 'shared-data.json',
+};
+
+function getGithubToken() {
+  return state.llmConfig?.githubToken || '';
+}
+
+function setGithubToken(token) {
+  if (!state.llmConfig) state.llmConfig = {};
+  state.llmConfig.githubToken = token;
+  saveState();
+}
+
+async function syncLoadFromCloud(silent = false) {
+  const url = `https://raw.githubusercontent.com/${SYNC_CONFIG.owner}/${SYNC_CONFIG.repo}/${SYNC_CONFIG.branch}/${SYNC_CONFIG.filePath}`;
+  try {
+    const resp = await fetch(url, { cache: 'no-cache' });
+    if (!resp.ok) {
+      if (!silent) showToast('☁️ 云端暂无共享数据，请先上传');
+      return null;
+    }
+    const data = await resp.json();
+    if (!data.trips || !Array.isArray(data.trips)) {
+      if (!silent) showToast('⚠️ 云端数据格式无效');
+      return null;
+    }
+    return data;
+  } catch (e) {
+    if (!silent) showToast('⚠️ 无法连接到云端，请检查网络');
+    return null;
+  }
+}
+
+async function syncSaveToCloud() {
+  const token = getGithubToken();
+  if (!token) {
+    showToast('⚠️ 请先在设置中配置 GitHub Token');
+    showSettingsModal();
+    return false;
+  }
+
+  const userName = state.llmConfig?.userName || '同伴';
+  const cloudData = {
+    trips: state.trips,
+    lastUpdatedBy: userName,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const url = `https://api.github.com/repos/${SYNC_CONFIG.owner}/${SYNC_CONFIG.repo}/contents/${SYNC_CONFIG.filePath}`;
+
+  try {
+    // First, get the current file SHA (needed for update)
+    let sha = '';
+    try {
+      const getResp = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.v3+json' },
+        cache: 'no-cache',
+      });
+      if (getResp.ok) {
+        const existing = await getResp.json();
+        sha = existing.sha || '';
+      }
+    } catch (e) { /* file might not exist yet */ }
+
+    const body = {
+      message: `☁️ ${userName} 更新了旅行数据`,
+      content: btoa(unescape(encodeURIComponent(JSON.stringify(cloudData, null, 2)))),
+      branch: SYNC_CONFIG.branch,
+    };
+    if (sha) body.sha = sha;
+
+    const putResp = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!putResp.ok) {
+      const err = await putResp.json().catch(() => ({}));
+      if (putResp.status === 401) {
+        showToast('⚠️ GitHub Token 无效或已过期');
+      } else if (putResp.status === 409) {
+        showToast('⚠️ 云端数据已被他人更新，请先下载最新版本再上传');
+      } else {
+        showToast(`⚠️ 上传失败: ${err.message || putResp.status}`);
+      }
+      return false;
+    }
+    return true;
+  } catch (e) {
+    showToast('⚠️ 网络错误，上传失败');
+    return false;
+  }
+}
+
+function showSyncModal() {
+  const hasToken = !!getGithubToken();
+  const userName = state.llmConfig?.userName || '';
+
+  showModal('☁️ 云端同步',
+    `<div style="text-align:center;padding:8px 0 20px">
+      <div style="font-size:48px;margin-bottom:12px">☁️</div>
+      <p style="color:var(--text-secondary);font-size:14px;margin-bottom:4px">
+        多人协作编辑旅行计划
+      </p>
+      <p style="color:var(--text-muted);font-size:12px">
+        数据存储在 GitHub 仓库中，所有人都可以读取和更新
+      </p>
+    </div>
+    <div class="card" style="padding:16px;margin-bottom:12px;background:var(--info-light);border:1px solid var(--info)">
+      <div style="font-size:13px;font-weight:600;margin-bottom:4px">🔗 共享网页链接</div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">发给同伴，打开即可查看和编辑</div>
+      <input class="form-input" value="https://ella0102-zhao.github.io/first-CC/" readonly
+             style="font-size:12px;cursor:pointer"
+             onclick="this.select();document.execCommand('copy');showToast('📋 链接已复制！')">
+    </div>
+    <div class="card" style="padding:16px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px">👤 我的名字</div>
+      <input class="form-input" id="sync-username" value="${escHtml(userName)}" placeholder="输入你的名字，方便知道谁更新了数据" style="font-size:13px">
+    </div>
+    ${!hasToken ? `
+    <div class="card" style="padding:16px;margin-bottom:12px;background:var(--danger-light);border:1px solid var(--danger)">
+      <div style="font-size:13px;font-weight:600;margin-bottom:4px">⚠️ 尚未配置 GitHub Token</div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">
+        需要 GitHub Personal Access Token 才能上传数据。在 GitHub Settings → Developer settings 中创建，勾选 <strong>repo</strong> 权限。
+      </div>
+      <input class="form-input" id="sync-token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" style="font-size:12px">
+    </div>
+    ` : `
+    <div style="font-size:12px;color:var(--success);text-align:center;margin-bottom:12px">✅ GitHub Token 已配置</div>
+    `}
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn btn-info" id="sync-download" style="flex:1">📥 从云端下载</button>
+      <button class="btn btn-primary" id="sync-upload" style="flex:1">📤 上传到云端</button>
+    </div>
+    <div id="sync-status" style="text-align:center;margin-top:12px;font-size:13px;color:var(--text-secondary)"></div>`,
+    `<button class="btn btn-secondary" onclick="closeModal()">关闭</button>
+     <button class="btn btn-info" id="sync-save-settings">💾 保存设置</button>`
+  );
+
+  setTimeout(() => {
+    const statusEl = document.getElementById('sync-status');
+
+    document.getElementById('sync-save-settings').addEventListener('click', () => {
+      const tokenEl = document.getElementById('sync-token');
+      const nameEl = document.getElementById('sync-username');
+      if (tokenEl && tokenEl.value.trim()) {
+        setGithubToken(tokenEl.value.trim());
+      }
+      if (nameEl && nameEl.value.trim()) {
+        if (!state.llmConfig) state.llmConfig = {};
+        state.llmConfig.userName = nameEl.value.trim();
+        saveState();
+      }
+      closeModal();
+      showToast('✅ 设置已保存');
+    });
+
+    document.getElementById('sync-download').addEventListener('click', async () => {
+      statusEl.textContent = '⏳ 正在从云端下载...';
+      const data = await syncLoadFromCloud();
+      if (data && data.trips) {
+        showConfirm('从云端下载',
+          `云端有 <strong>${data.trips.length}</strong> 个旅行计划（最后更新：${data.lastUpdatedBy || '未知'}，${new Date(data.updatedAt).toLocaleString('zh-CN')}）。<br><br>这将<strong>替换</strong>你当前的本地数据，确定继续吗？`,
+          () => {
+            state.trips = data.trips;
+            state.trips.forEach(t => {
+              if (!t.packing) t.packing = defaultPackingItems(t.tripType || 'city');
+            });
+            state.activeTripId = state.trips.length > 0 ? state.trips[0].id : null;
+            if (!state.activeTripId) state.currentView = 'dashboard';
+            saveState();
+            render();
+            closeModal();
+            showToast('✅ 已从云端下载 ' + data.trips.length + ' 个旅行计划');
+          });
+      } else {
+        statusEl.textContent = '⚠️ 下载失败，请检查网络或确认云端有数据';
+      }
+    });
+
+    document.getElementById('sync-upload').addEventListener('click', async () => {
+      if (!getGithubToken()) {
+        showToast('⚠️ 请先配置 GitHub Token');
+        return;
+      }
+      if (state.trips.length === 0) {
+        showToast('⚠️ 没有可上传的旅行计划');
+        return;
+      }
+      showConfirm('上传到云端',
+        `将上传 <strong>${state.trips.length}</strong> 个旅行计划到云端共享存储。<br><br>同伴可以从云端下载获取最新数据。确定上传吗？`,
+        async () => {
+          statusEl.textContent = '⏳ 正在上传...';
+          const ok = await syncSaveToCloud();
+          if (ok) {
+            statusEl.textContent = '✅ 上传成功！同伴可以下载最新数据了';
+            showToast('✅ 已上传到云端');
+          } else {
+            statusEl.textContent = '⚠️ 上传失败，请检查 Token 或网络';
+          }
+        });
+    });
+  }, 50);
 }
 
 /* =============================================
@@ -1315,8 +1535,11 @@ function showSettingsModal() {
   const config = getLlmConfig();
   const providerModels = { deepseek: 'deepseek-chat', anthropic: 'claude-sonnet-5-20251001', openai: 'gpt-4o' };
   const providerPlaceholders = { deepseek: 'sk-...', anthropic: 'sk-ant-...', openai: 'sk-...' };
-  showModal('⚙️ API 设置',
-    `<div class="form-group"><label class="form-label">AI 服务商</label>
+  const githubToken = config.githubToken || '';
+  const userName = config.userName || '';
+  showModal('⚙️ 设置',
+    `<div style="font-size:14px;font-weight:600;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)">🤖 AI 服务</div>
+    <div class="form-group"><label class="form-label">AI 服务商</label>
       <select class="form-select" id="sm-provider" onchange="document.getElementById('sm-model').placeholder=this.options[this.selectedIndex].dataset.model||''">
         <option value="deepseek" ${config.provider === 'deepseek' ? 'selected' : ''} data-model="deepseek-chat">🚀 DeepSeek（免费注册即可使用）</option>
         <option value="anthropic" ${config.provider === 'anthropic' ? 'selected' : ''} data-model="claude-sonnet-5-20251001">Anthropic (Claude)</option>
@@ -1326,11 +1549,22 @@ function showSettingsModal() {
     <div class="form-group"><label class="form-label">API Key</label>
       <input class="form-input" type="password" id="sm-api-key" value="${escHtml(config.apiKey || '')}" placeholder="${providerPlaceholders[config.provider] || 'sk-...'}">
       <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
-        ${config.provider === 'deepseek' || !config.provider ? '💡 DeepSeek 免费注册即送额度，<a href="https://platform.deepseek.com" target="_blank">点此注册 →</a>' : 'API Key 仅保存在浏览器本地，不会上传到任何服务器'}
+        ${config.provider === 'deepseek' || !config.provider ? '💡 DeepSeek 免费注册即送额度，<a href="https://platform.deepseek.com" target="_blank">点此注册 →</a>' : 'API Key 仅保存在浏览器本地'}
       </div>
     </div>
     <div class="form-group"><label class="form-label">模型名称</label>
       <input class="form-input" id="sm-model" value="${escHtml(config.model || '')}" placeholder="${providerModels[config.provider] || 'deepseek-chat'}">
+    </div>
+
+    <div style="font-size:14px;font-weight:600;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)">☁️ 云端同步</div>
+    <div class="form-group"><label class="form-label">你的名字</label>
+      <input class="form-input" id="sm-username" value="${escHtml(userName)}" placeholder="输入名字，同伴能看到谁更新了数据">
+    </div>
+    <div class="form-group"><label class="form-label">GitHub Token</label>
+      <input class="form-input" type="password" id="sm-gh-token" value="${escHtml(githubToken)}" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+        🔑 在 <a href="https://github.com/settings/tokens" target="_blank">GitHub Settings → Developer settings → Personal access tokens</a> 创建，勾选 <strong>repo</strong> 权限即可
+      </div>
     </div>
     <div id="sm-error" class="form-error" style="display:none"></div>`,
     `<button class="btn btn-secondary" onclick="closeModal()">取消</button>
@@ -1340,18 +1574,23 @@ function showSettingsModal() {
   setTimeout(() => {
     document.getElementById('sm-submit').addEventListener('click', () => {
       const apiKey = document.getElementById('sm-api-key').value.trim();
-      if (!apiKey) { document.getElementById('sm-error').textContent = '请输入 API Key'; document.getElementById('sm-error').style.display = 'block'; return; }
       const provider = document.getElementById('sm-provider').value;
+      const model = document.getElementById('sm-model').value.trim() || (providerModels[provider] || 'deepseek-chat');
+      const ghToken = document.getElementById('sm-gh-token').value.trim();
+      const userName = document.getElementById('sm-username').value.trim();
+
       saveLlmConfig({
         provider: provider,
         apiKey: apiKey,
-        model: document.getElementById('sm-model').value.trim() || (providerModels[provider] || 'deepseek-chat'),
+        model: model,
+        githubToken: ghToken || config.githubToken || '',
+        userName: userName || config.userName || '',
       });
-      closeModal(); showToast('✅ API 设置已保存');
+      closeModal(); showToast('✅ 设置已保存');
     });
     document.getElementById('sm-clear').addEventListener('click', () => {
-      saveLlmConfig({ provider: 'deepseek', apiKey: '', model: 'deepseek-chat' });
-      closeModal(); showToast('🗑️ API 设置已清除');
+      saveLlmConfig({ provider: 'deepseek', apiKey: '', model: 'deepseek-chat', githubToken: '', userName: '' });
+      closeModal(); showToast('🗑️ 设置已清除');
     });
   }, 50);
 }
