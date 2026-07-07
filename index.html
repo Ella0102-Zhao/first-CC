@@ -981,6 +981,7 @@ function createTrip(data) {
   state.trips.push(trip);
   state.activeTripId = trip.id;
   saveState();
+  render();
   return trip;
 }
 
@@ -1005,6 +1006,7 @@ function updateTrip(tripId, data) {
     for (let i = newDays + 1; i <= oldDays; i++) delete trip.itinerary[`Day ${i}`];
   }
   saveState();
+  render();
 }
 
 function deleteTrip(tripId) {
@@ -1034,6 +1036,7 @@ function addActivity(tripId, day, activity) {
     type: activity.type || 'other'
   });
   saveState();
+  render();
 }
 
 function updateActivity(tripId, day, actId, data) {
@@ -1047,6 +1050,7 @@ function updateActivity(tripId, day, actId, data) {
     cost: Number(data.cost) || 0, type: data.type || act.type
   });
   saveState();
+  render();
 }
 
 function deleteActivity(tripId, day, actId) {
@@ -1054,6 +1058,7 @@ function deleteActivity(tripId, day, actId) {
   if (!trip || !trip.itinerary[day]) return;
   trip.itinerary[day] = trip.itinerary[day].filter(a => a.id !== actId);
   saveState();
+  render();
 }
 
 function moveActivity(tripId, day, actId, direction) {
@@ -1066,6 +1071,7 @@ function moveActivity(tripId, day, actId, direction) {
   if (newIdx < 0 || newIdx >= arr.length) return;
   [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
   saveState();
+  render();
 }
 
 function editActivityById(tripId, day, actId) {
@@ -1089,6 +1095,7 @@ function addExpense(tripId, expense) {
   if (!trip) return;
   trip.expenses.push({ id: genId(), amount: Number(expense.amount) || 0, category: expense.category, date: expense.date || '', note: expense.note || '' });
   saveState();
+  render();
 }
 
 function deleteExpense(tripId, expId) {
@@ -1096,6 +1103,7 @@ function deleteExpense(tripId, expId) {
   if (!trip) return;
   trip.expenses = trip.expenses.filter(e => e.id !== expId);
   saveState();
+  render();
 }
 
 function getCategoryTotal(trip, category) { return trip.expenses.filter(e => e.category === category).reduce((sum, e) => sum + e.amount, 0); }
@@ -1111,18 +1119,21 @@ function togglePackingItem(tripId, category, itemId) {
   const item = trip.packing[category].find(i => i.id === itemId);
   if (item) item.checked = !item.checked;
   saveState();
+  render();
 }
 function addPackingItem(tripId, category, name) {
   const trip = state.trips.find(t => t.id === tripId);
   if (!trip || !trip.packing[category]) return;
   trip.packing[category].push({ id: genId(), name, checked: false });
   saveState();
+  render();
 }
 function deletePackingItem(tripId, category, itemId) {
   const trip = state.trips.find(t => t.id === tripId);
   if (!trip || !trip.packing[category]) return;
   trip.packing[category] = trip.packing[category].filter(i => i.id !== itemId);
   saveState();
+  render();
 }
 function getPackingStats(trip) {
   let total = 0, packed = 0;
@@ -1219,7 +1230,6 @@ function showTripForm(trip = null) {
       if (isEdit) { updateTrip(trip.id, formData); showToast('✅ 旅行计划已更新'); }
       else { createTrip(formData); showToast('🎉 旅行计划已创建！'); }
       closeModal();
-      render();
     });
   }, 50);
 }
@@ -1258,7 +1268,7 @@ function showActivityForm(tripId, day, activity = null) {
       };
       if (isEdit) { updateActivity(tripId, day, activity.id, actData); showToast('✅ 活动已更新'); }
       else { addActivity(tripId, day, actData); showToast('✅ 活动已添加'); }
-      closeModal(); render();
+      closeModal();
     });
   }, 50);
 }
@@ -1280,7 +1290,7 @@ function showExpenseForm(tripId) {
       const amount = document.getElementById('ef-amount').value;
       if (!amount || Number(amount) <= 0) { showFieldError('ef-error', '请输入有效金额'); return; }
       addExpense(tripId, { amount, category: document.getElementById('ef-category').value, date: document.getElementById('ef-date').value, note: document.getElementById('ef-note').value });
-      closeModal(); render(); showToast('✅ 支出已记录');
+      closeModal(); showToast('✅ 支出已记录');
     });
   }, 50);
 }
@@ -1293,7 +1303,7 @@ function showAddPackingItem(tripId, category) {
     document.getElementById('pi-submit').addEventListener('click', () => {
       const name = document.getElementById('pi-name').value.trim();
       if (!name) { showFieldError('pi-error', '请输入物品名称'); return; }
-      addPackingItem(tripId, category, name); closeModal(); render(); showToast('✅ 物品已添加');
+      addPackingItem(tripId, category, name); closeModal(); showToast('✅ 物品已添加');
     });
   }, 50);
 }
@@ -2107,7 +2117,7 @@ function renderDashboard(main) {
         </div>
         ${trip.budget > 0 ? `<div class="progress-bar" style="margin-top:12px"><div class="progress-fill ${budgetUsage > 100 ? 'danger' : budgetUsage > 80 ? 'warning' : 'safe'}" style="width:${Math.min(budgetUsage, 100)}%"></div></div>` : ''}
         <div style="margin-top:12px;display:flex;gap:8px" onclick="event.stopPropagation()">
-          <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();showTripForm(state.trips.find(t=>t.id==='${trip.id}'));render()">✏️ 编辑</button>
+          <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();showTripForm(state.trips.find(t=>t.id==='${trip.id}'))">✏️ 编辑</button>
           <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();showConfirm('删除旅行','确定要删除「${escHtml(trip.name)}」吗？此操作不可撤销。',()=>deleteTrip('${trip.id}'))">🗑️ 删除</button>
         </div>
       </div>
@@ -2472,7 +2482,7 @@ function renderItinerary(main, trip) {
             <button class="btn btn-xs btn-secondary" onclick="moveActivity('${trip.id}','${activeDay}','${act.id}',-1)" ${idx === 0 ? 'disabled' : ''}>↑</button>
             <button class="btn btn-xs btn-secondary" onclick="moveActivity('${trip.id}','${activeDay}','${act.id}',1)" ${idx === activities.length - 1 ? 'disabled' : ''}>↓</button>
             <button class="btn btn-xs btn-secondary" onclick="editActivityById('${trip.id}','${activeDay}','${act.id}')">✏️</button>
-            <button class="btn btn-xs btn-danger" onclick="deleteActivity('${trip.id}','${activeDay}','${act.id}');render();showToast('✅ 活动已删除')">✕</button>
+            <button class="btn btn-xs btn-danger" onclick="deleteActivity('${trip.id}','${activeDay}','${act.id}');showToast('✅ 活动已删除')">✕</button>
           </div>
         </div>
       `).join('')}
@@ -2558,7 +2568,7 @@ function renderBudget(main, trip) {
         <span style="flex:1;font-weight:500">${escHtml(e.note || CATEGORY_LABELS[e.category].split(' ').slice(1).join(' '))}</span>
         ${e.date ? `<span style="color:var(--text-muted)">${e.date}</span>` : ''}
         <span style="font-weight:600;color:var(--danger)">-${formatCurrency(e.amount)}</span>
-        <button class="btn btn-xs btn-danger" onclick="deleteExpense('${trip.id}','${e.id}');render();showToast('已删除')">✕</button>
+        <button class="btn btn-xs btn-danger" onclick="deleteExpense('${trip.id}','${e.id}');showToast('已删除')">✕</button>
       </div>`).join('');
 
   main.innerHTML = `
@@ -2609,9 +2619,9 @@ function renderPacking(main, trip) {
       <h3>${catNames[catKey] || catKey} (${items.filter(i=>i.checked).length}/${items.length})</h3>
       ${items.map(item => `
         <div class="packing-item">
-          <input type="checkbox" ${item.checked ? 'checked' : ''} onchange="togglePackingItem('${trip.id}','${catKey}','${item.id}');render()">
+          <input type="checkbox" ${item.checked ? 'checked' : ''} onchange="togglePackingItem('${trip.id}','${catKey}','${item.id}')">
           <span class="${item.checked ? 'checked' : ''}">${escHtml(item.name)}</span>
-          <button class="btn btn-xs btn-danger" style="margin-left:auto" onclick="deletePackingItem('${trip.id}','${catKey}','${item.id}');render()">✕</button>
+          <button class="btn btn-xs btn-danger" style="margin-left:auto" onclick="deletePackingItem('${trip.id}','${catKey}','${item.id}')">✕</button>
         </div>`).join('')}
       <button class="btn btn-sm btn-secondary" style="margin-top:8px" onclick="showAddPackingItem('${trip.id}','${catKey}')">➕ 添加物品</button>
     </div>`).join('');
@@ -2627,6 +2637,102 @@ function renderPacking(main, trip) {
     <div class="packing-progress"><span>🎒</span><div class="bar"><div class="bar-fill" style="width:${stats.pct}%"></div></div><span class="text">${stats.pct}% 完成</span></div>
     <div class="card">${categoriesHtml}</div>`;
 }
+
+/* =============================================
+   ONE-TIME IMPORT: 川渝三地旅游攻略
+   ============================================= */
+(function importChuanYuGuide() {
+  const IMPORT_ID = 'chuan-yu-guide-2026-v1';
+
+  // 如果已导入则跳过
+  if (state.trips.some(t => t._importId === IMPORT_ID)) return;
+
+  const trip = {
+    id: genId(),
+    _importId: IMPORT_ID,
+    name: '川渝三地深度游（重庆→成都→九寨沟）',
+    country: '中国',
+    startDate: '2026-08-01',
+    endDate: '2026-08-09',
+    budget: 8000,
+    budgetType: 'personal',
+    travelers: 1,
+    notes: '精简优化版行程（9-10天），涵盖重庆8D魔幻山城、成都天府文化、九寨沟黄龙世界级自然遗产。全程高铁+包车+飞机，住宿推荐：解放碑/观音桥（重庆）、春熙路/太古里（成都）、九寨沟沟口（九寨沟）。',
+    tripType: 'city',
+    travelStyles: ['food', 'photography', 'culture', 'nature'],
+    colorIndex: state.trips.length,
+    itinerary: {},
+    expenses: [],
+    packing: defaultPackingItems('city'),
+    createdAt: new Date().toISOString()
+  };
+
+  const days = daysBetween(trip.startDate, trip.endDate);
+  for (let i = 1; i <= days; i++) trip.itinerary[`Day ${i}`] = [];
+
+  function addAct(t, day, time, title, description, location, cost, type) {
+    if (!t.itinerary[day]) t.itinerary[day] = [];
+    t.itinerary[day].push({
+      id: genActId(),
+      time: time,
+      title: title,
+      description: description || '',
+      location: location || '',
+      cost: Number(cost) || 0,
+      type: type || 'other'
+    });
+  }
+
+  // ── Day 1：重庆 · 抵达 & 夜景 ──
+  addAct(trip, 'Day 1', '下午', '抵达重庆', '抵达重庆江北机场，前往解放碑或观音桥附近酒店入住', '重庆江北机场', 800, 'flight');
+  addAct(trip, 'Day 1', '晚上', '解放碑步行街', '逛解放碑商圈，感受重庆CBD繁华', '解放碑', 0, 'attraction');
+  addAct(trip, 'Day 1', '晚上', '洪崖洞夜景', '步行至洪崖洞，欣赏千与千寻般的吊脚楼夜景', '洪崖洞', 0, 'attraction');
+
+  // ── Day 2：重庆 · 山城文化 ──
+  addAct(trip, 'Day 2', '上午', '山城步道', '走山城步道，感受老重庆的梯坎文化', '山城步道', 0, 'attraction');
+  addAct(trip, 'Day 2', '下午', '观音桥逛吃', '去观音桥逛吃，体验重庆的时尚一面', '观音桥', 150, 'food');
+  addAct(trip, 'Day 2', '晚上', '长江索道', '坐长江索道（单程即可）看两江夜景', '长江索道', 20, 'attraction');
+
+  // ── Day 3：成都 · 抵达 & 时尚烟火 ──
+  addAct(trip, 'Day 3', '上午', '高铁到成都', '从重庆坐高铁到成都，约1.5小时', '重庆北站→成都东站', 150, 'transport');
+  addAct(trip, 'Day 3', '下午', '太古里 & 春熙路', '逛太古里和春熙路，感受成都的时尚与烟火气', '太古里、春熙路', 0, 'shopping');
+  addAct(trip, 'Day 3', '晚上', '九眼桥夜生活', '去九眼桥喝点小酒，体验成都夜生活', '九眼桥', 150, 'attraction');
+
+  // ── Day 4：成都 · 文化之旅 ──
+  addAct(trip, 'Day 4', '上午', '武侯祠', '参观武侯祠（丞相祠堂），感受三国文化', '武侯祠', 50, 'attraction');
+  addAct(trip, 'Day 4', '上午', '锦里古街', '逛武侯祠旁的锦里古街，品尝小吃', '锦里', 80, 'food');
+  addAct(trip, 'Day 4', '下午', '杜甫草堂', '参观杜甫草堂，感受诗圣故居', '杜甫草堂', 50, 'attraction');
+  addAct(trip, 'Day 4', '晚上', '宽窄巷子', '逛宽窄巷子，吃顿地道川菜', '宽窄巷子', 150, 'food');
+
+  // ── Day 5：成都 · 文殊院 & 三星堆 ──
+  addAct(trip, 'Day 5', '上午', '文殊院 & 周边小吃', '参观文殊院，周边品尝地道小吃（洞子口张老二凉粉、宫廷糕点铺等）', '文殊院', 80, 'food');
+  addAct(trip, 'Day 5', '下午', '三星堆博物馆', '从成都坐高铁到广汉北站（十几分钟），再打车前往三星堆博物馆', '三星堆博物馆（广汉）', 120, 'attraction');
+
+  // ── Day 6：九寨沟+黄龙 · 抵达 & 黄龙 ──
+  addAct(trip, 'Day 6', '上午', '高铁到黄龙九寨站', '从成都东站坐高铁到黄龙九寨站，约2小时', '成都东站→黄龙九寨站', 200, 'transport');
+  addAct(trip, 'Day 6', '下午', '黄龙景区', '包车前往黄龙景区（约4-5小时），坐索道上下节省体力', '黄龙景区', 250, 'attraction');
+  addAct(trip, 'Day 6', '晚上', '前往九寨沟沟口', '游玩后包车回九寨沟沟口住宿，车程约2小时', '九寨沟沟口', 200, 'transport');
+
+  // ── Day 7：九寨沟 · 深度游 ──
+  addAct(trip, 'Day 7', '全天', '九寨沟深度游', '全天深度游玩九寨沟，景区观光车很方便，按Y字形线路游览精华景点（五花海、诺日朗瀑布、长海等）', '九寨沟', 300, 'attraction');
+
+  // ── Day 8：中查沟 & 返程 ──
+  addAct(trip, 'Day 8', '上午', '中查沟骑马体验', '在九寨沟沟口休整，或去附近的中查沟骑马体验藏家风情', '中查沟', 150, 'attraction');
+  addAct(trip, 'Day 8', '下午', '返程', '提前2小时到九寨黄龙机场，直飞返回', '九寨黄龙机场', 1200, 'flight');
+
+  // ── Day 9：灵活返程日 ──
+  addAct(trip, 'Day 9', '全天', '灵活返程日', '预留一天灵活调整，可提前返程或增加额外景点', '', 0, 'other');
+
+  state.trips.push(trip);
+  state.activeTripId = trip.id;
+  saveState();
+
+  console.log('✅ 川渝三地旅游攻略已自动导入！');
+  console.log('   🏙️ Day 1-2: 重庆（解放碑、洪崖洞、山城步道、长江索道）');
+  console.log('   🐼 Day 3-5: 成都（太古里、武侯祠、杜甫草堂、三星堆）');
+  console.log('   🏔️ Day 6-8: 九寨沟+黄龙（世界级自然遗产）');
+  console.log('   ✈️ Day 9: 灵活返程');
+})();
 
 /* =============================================
    INITIAL RENDER
