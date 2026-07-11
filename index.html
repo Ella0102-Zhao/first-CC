@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>🌍 旅行规划器 Pro</title>
+<!-- Firebase SDK -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+<script src="firebase-config.js"></script>
 <style>
 /* =============================================
    CSS Custom Properties
@@ -742,7 +746,9 @@ const defaultState = {
   trips: [],
   activeTripId: null,
   currentView: 'dashboard',
-  llmConfig: { provider: 'deepseek', apiKey: '', model: 'deepseek-chat' }
+  llmConfig: { provider: 'deepseek', apiKey: '', model: 'deepseek-chat' },
+  remoteTrips: {},
+  groupMembers: {}
 };
 
 function loadState() {
@@ -958,221 +964,365 @@ function handleImportFile(event) {
 }
 
 /* =============================================
-   CLOUD SYNC — GitHub-based collaboration
+   FIREBASE MULTI-USER COLLABORATION
    ============================================= */
-const SYNC_CONFIG = {
-  owner: 'Ella0102-Zhao',
-  repo: 'first-CC',
-  branch: 'main',
-  filePath: 'shared-data.json',
-};
+let firebaseDB = null;
+let groupId = null;
+let memberId = null;
+let groupUnsubscribe = null;
 
-function getGithubToken() {
-  return state.llmConfig?.githubToken || '';
+// Read group ID from URL: ?group=xxx
+function getGroupIdFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('group') || '';
 }
 
-function setGithubToken(token) {
-  if (!state.llmConfig) state.llmConfig = {};
-  state.llmConfig.githubToken = token;
+// Generate or load persistent member ID
+function getMemberId() {
+  let mid = localStorage.getItem('travel-member-id');
+  if (!mid) {
+    mid = 'member_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    localStorage.setItem('travel-member-id', mid);
+  }
+  return mid;
+}
+
+function getMemberName() {
+  return state.llmConfig?.userName || '未命名';
+}
+
+function initFirebase() {
+  if (firebaseDB) return true;
+  try {
+    if (!FIREBASE_CONFIG || FIREBASE_CONFIG.apiKey === 'YOUR_API_KEY') return false;
+    firebase.initializeApp(FIREBASE_CONFIG);
+    firebaseDB = firebase.database();
+    console.log('🔥 Firebase 已连接');
+    return true;
+  } catch (e) {
+    console.log('🔥 Firebase 未配置:', e.message);
+    return false;
+  }
+}
+
+// ── Group Management ──
+
+function isGroupMode() {
+  return !!groupId;
+}
+
+async function joinGroup(gid) {
+  if (!initFirebase()) {
+    showToast('⚠️ Firebase 未配置，请联系群主设置');
+    return;
+  }
+  groupId = gid;
+  memberId = getMemberId();
+  const memberName = getMemberName();
+
+  // Register this member in the group
+  const memberRef = firebaseDB.ref(`groups/${groupId}/members/${memberId}`);
+  await memberRef.update({
+    name: memberName || '新成员',
+    joinedAt: new Date().toISOString(),
+    lastActive: firebase.database.ServerValue.TIMESTAMP,
+  });
+
+  // Update group metadata
+  const groupRef = firebaseDB.ref(`groups/${groupId}/meta`);
+  await groupRef.update({
+    lastActivity: firebase.database.ServerValue.TIMESTAMP,
+  });
+
+  // Listen for all member data changes
+  listenToGroup();
+
+  // Update URL without reload
+  const url = new URL(window.location);
+  url.searchParams.set('group', groupId);
+  window.history.replaceState({}, '', url);
+
+  showToast('✅ 已加入协作组');
+}
+
+function leaveGroup() {
+  if (groupUnsubscribe) {
+    groupUnsubscribe();
+    groupUnsubscribe = null;
+  }
+  groupId = null;
+  const url = new URL(window.location);
+  url.searchParams.delete('group');
+  window.history.replaceState({}, '', url);
+  render();
+  showToast('👤 已切换到个人模式');
+}
+
+function listenToGroup() {
+  if (groupUnsubscribe) groupUnsubscribe();
+  if (!groupId || !firebaseDB) return;
+
+  const groupRef = firebaseDB.ref(`groups/${groupId}/members`);
+  groupUnsubscribe = groupRef.on('value', (snapshot) => {
+    const membersData = snapshot.val() || {};
+
+    // Update each member's trips in our local view
+    // We keep local state for current user, sync others as read-only cache
+    Object.entries(membersData).forEach(([mid, mdata]) => {
+      if (mid === memberId) return; // skip self
+      if (mdata.trips && Array.isArray(mdata.trips)) {
+        // Store remote members' trips in a cache
+        if (!state.remoteTrips) state.remoteTrips = {};
+        state.remoteTrips[mid] = {
+          name: mdata.name || '未知',
+          trips: mdata.trips,
+          lastActive: mdata.lastActive,
+        };
+      }
+    });
+
+    // Save member names we know
+    if (!state.groupMembers) state.groupMembers = {};
+    Object.entries(membersData).forEach(([mid, mdata]) => {
+      state.groupMembers[mid] = {
+        name: mdata.name || '未知',
+        lastActive: mdata.lastActive,
+      };
+    });
+
+    saveState();
+    render();
+  });
+}
+
+// ── Push local trips to Firebase ──
+
+async function pushMyTrips() {
+  if (!isGroupMode() || !firebaseDB) return;
+  const memberRef = firebaseDB.ref(`groups/${groupId}/members/${memberId}`);
+  await memberRef.update({
+    name: getMemberName() || '未命名',
+    trips: state.trips,
+    lastActive: firebase.database.ServerValue.TIMESTAMP,
+  });
+}
+
+// ── Pull group members' trips (called on join) ──
+
+async function pullGroupTrips() {
+  if (!isGroupMode() || !firebaseDB) return;
+  const groupRef = firebaseDB.ref(`groups/${groupId}/members`);
+  const snapshot = await groupRef.once('value');
+  const membersData = snapshot.val() || {};
+
+  if (!state.remoteTrips) state.remoteTrips = {};
+  if (!state.groupMembers) state.groupMembers = {};
+
+  Object.entries(membersData).forEach(([mid, mdata]) => {
+    state.groupMembers[mid] = {
+      name: mdata.name || '未知',
+      lastActive: mdata.lastActive,
+    };
+    if (mid !== memberId && mdata.trips) {
+      state.remoteTrips[mid] = {
+        name: mdata.name || '未知',
+        trips: mdata.trips,
+        lastActive: mdata.lastActive,
+      };
+    }
+  });
   saveState();
 }
 
-async function syncLoadFromCloud(silent = false) {
-  const url = `https://raw.githubusercontent.com/${SYNC_CONFIG.owner}/${SYNC_CONFIG.repo}/${SYNC_CONFIG.branch}/${SYNC_CONFIG.filePath}`;
-  try {
-    const resp = await fetch(url, { cache: 'no-cache' });
-    if (!resp.ok) {
-      if (!silent) showToast('☁️ 云端暂无共享数据，请先上传');
-      return null;
-    }
-    const data = await resp.json();
-    if (!data.trips || !Array.isArray(data.trips)) {
-      if (!silent) showToast('⚠️ 云端数据格式无效');
-      return null;
-    }
-    return data;
-  } catch (e) {
-    if (!silent) showToast('⚠️ 无法连接到云端，请检查网络');
-    return null;
+// ── Create a new group ──
+
+async function createGroup() {
+  if (!initFirebase()) {
+    showToast('⚠️ Firebase 未配置，请先设置');
+    return;
   }
+  const gid = 'group_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  await joinGroup(gid);
+  // Copy current trips to Firebase
+  await pushMyTrips();
+  showSyncModal(); // Re-show modal with new link
+  showToast('🎉 协作组已创建！复制链接分享给同伴');
 }
 
-async function syncSaveToCloud() {
-  const token = getGithubToken();
-  if (!token) {
-    showToast('⚠️ 请先在设置中配置 GitHub Token');
-    showSettingsModal();
-    return false;
-  }
-
-  const userName = state.llmConfig?.userName || '同伴';
-  const cloudData = {
-    trips: state.trips,
-    lastUpdatedBy: userName,
-    updatedAt: new Date().toISOString(),
-  };
-
-  const url = `https://api.github.com/repos/${SYNC_CONFIG.owner}/${SYNC_CONFIG.repo}/contents/${SYNC_CONFIG.filePath}`;
-
-  try {
-    // First, get the current file SHA (needed for update)
-    let sha = '';
-    try {
-      const getResp = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.v3+json' },
-        cache: 'no-cache',
-      });
-      if (getResp.ok) {
-        const existing = await getResp.json();
-        sha = existing.sha || '';
-      }
-    } catch (e) { /* file might not exist yet */ }
-
-    const body = {
-      message: `☁️ ${userName} 更新了旅行数据`,
-      content: btoa(unescape(encodeURIComponent(JSON.stringify(cloudData, null, 2)))),
-      branch: SYNC_CONFIG.branch,
-    };
-    if (sha) body.sha = sha;
-
-    const putResp = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!putResp.ok) {
-      const err = await putResp.json().catch(() => ({}));
-      if (putResp.status === 401) {
-        showToast('⚠️ GitHub Token 无效或已过期');
-      } else if (putResp.status === 409) {
-        showToast('⚠️ 云端数据已被他人更新，请先下载最新版本再上传');
-      } else {
-        showToast(`⚠️ 上传失败: ${err.message || putResp.status}`);
-      }
-      return false;
-    }
-    return true;
-  } catch (e) {
-    showToast('⚠️ 网络错误，上传失败');
-    return false;
-  }
-}
+// ── Sync Modal ──
 
 function showSyncModal() {
-  const hasToken = !!getGithubToken();
-  const userName = state.llmConfig?.userName || '';
+  const hasFirebase = initFirebase();
+  const memberName = getMemberName();
+  const shareLink = groupId
+    ? `${window.location.origin}${window.location.pathname}?group=${groupId}`
+    : '';
 
-  showModal('☁️ 云端同步',
-    `<div style="text-align:center;padding:8px 0 20px">
-      <div style="font-size:48px;margin-bottom:12px">☁️</div>
-      <p style="color:var(--text-secondary);font-size:14px;margin-bottom:4px">
-        多人协作编辑旅行计划
-      </p>
-      <p style="color:var(--text-muted);font-size:12px">
-        数据存储在 GitHub 仓库中，所有人都可以读取和更新
-      </p>
-    </div>
+  const statusHTML = groupId
+    ? `<div class="card" style="padding:16px;margin-bottom:12px;background:var(--success-light);border:1px solid var(--success)">
+        <div style="font-size:13px;font-weight:600;color:var(--success)">✅ 协作组已连接</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-top:4px">
+          组 ID：<code>${groupId}</code> · 成员 <span id="sync-member-count">-</span> 人
+        </div>
+      </div>`
+    : `<div style="text-align:center;padding:8px 0 20px">
+        <div style="font-size:48px;margin-bottom:12px">👥</div>
+        <p style="color:var(--text-secondary);font-size:14px">创建或加入协作组，和同伴一起规划旅行</p>
+      </div>`;
+
+  showModal('👥 多人协作',
+    `${statusHTML}
+
+    ${groupId ? `
     <div class="card" style="padding:16px;margin-bottom:12px;background:var(--info-light);border:1px solid var(--info)">
-      <div style="font-size:13px;font-weight:600;margin-bottom:4px">🔗 共享网页链接</div>
-      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">发给同伴，打开即可查看和编辑</div>
-      <input class="form-input" value="https://ella0102-zhao.github.io/first-CC/" readonly
+      <div style="font-size:13px;font-weight:600;margin-bottom:4px">🔗 分享此链接给同伴</div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">同伴打开链接后输入名字即可加入</div>
+      <input class="form-input" value="${shareLink}" readonly
              style="font-size:12px;cursor:pointer"
-             onclick="this.select();document.execCommand('copy');showToast('📋 链接已复制！')">
+             onclick="this.select();document.execCommand('copy');showToast('📋 链接已复制！发给同伴吧')">
     </div>
+    ` : ''}
+
     <div class="card" style="padding:16px;margin-bottom:12px">
       <div style="font-size:13px;font-weight:600;margin-bottom:8px">👤 我的名字</div>
-      <input class="form-input" id="sync-username" value="${escHtml(userName)}" placeholder="输入你的名字，方便知道谁更新了数据" style="font-size:13px">
+      <input class="form-input" id="sync-username" value="${escHtml(memberName)}" placeholder="输入你的名字，同伴可以看到">
     </div>
-    ${!hasToken ? `
+
+    ${!hasFirebase ? `
     <div class="card" style="padding:16px;margin-bottom:12px;background:var(--danger-light);border:1px solid var(--danger)">
-      <div style="font-size:13px;font-weight:600;margin-bottom:4px">⚠️ 尚未配置 GitHub Token</div>
-      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">
-        需要 GitHub Personal Access Token 才能上传数据。在 GitHub Settings → Developer settings 中创建，勾选 <strong>repo</strong> 权限。
+      <div style="font-size:13px;font-weight:600;margin-bottom:4px">⚠️ Firebase 未配置</div>
+      <div style="font-size:12px;color:var(--text-secondary)">
+        群主需要先创建 Firebase 项目并配置 <code>firebase-config.js</code>
       </div>
-      <input class="form-input" id="sync-token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" style="font-size:12px">
+    </div>
+    ` : ''}
+
+    ${!groupId ? `
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn btn-primary" id="sync-create-group" style="flex:1">🆕 创建协作组</button>
+      <button class="btn btn-info" id="sync-join-group" style="flex:1">🔗 加入已有组</button>
     </div>
     ` : `
-    <div style="font-size:12px;color:var(--success);text-align:center;margin-bottom:12px">✅ GitHub Token 已配置</div>
-    `}
     <div style="display:flex;gap:8px;margin-top:16px">
-      <button class="btn btn-info" id="sync-download" style="flex:1">📥 从云端下载</button>
-      <button class="btn btn-primary" id="sync-upload" style="flex:1">📤 上传到云端</button>
+      <button class="btn btn-danger" id="sync-leave-group" style="flex:1">🚪 离开协作组</button>
     </div>
-    <div id="sync-status" style="text-align:center;margin-top:12px;font-size:13px;color:var(--text-secondary)"></div>`,
+    `}
+
+    ${groupId ? `
+    <div style="margin-top:16px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px">👥 组成员</div>
+      <div id="sync-member-list" style="font-size:12px;color:var(--text-secondary)">加载中...</div>
+    </div>
+    ` : ''}
+
+    <div id="sync-status" style="text-align:center;margin-top:12px;font-size:13px;color:var(--text-secondary)"></div>
+    ${groupId ? `<div style="text-align:center;margin-top:4px;font-size:11px;color:var(--text-muted)">💡 修改行程后自动同步到云端</div>` : ''}`,
+
     `<button class="btn btn-secondary" onclick="closeModal()">关闭</button>
-     <button class="btn btn-info" id="sync-save-settings">💾 保存设置</button>`
+     <button class="btn btn-info" id="sync-save-name">💾 保存名字</button>`
   );
 
-  setTimeout(() => {
-    const statusEl = document.getElementById('sync-status');
-
-    document.getElementById('sync-save-settings').addEventListener('click', () => {
-      const tokenEl = document.getElementById('sync-token');
+  setTimeout(async () => {
+    // Save name button
+    document.getElementById('sync-save-name').addEventListener('click', () => {
       const nameEl = document.getElementById('sync-username');
-      if (tokenEl && tokenEl.value.trim()) {
-        setGithubToken(tokenEl.value.trim());
-      }
       if (nameEl && nameEl.value.trim()) {
         if (!state.llmConfig) state.llmConfig = {};
         state.llmConfig.userName = nameEl.value.trim();
         saveState();
+        if (isGroupMode()) pushMyTrips();
+        closeModal();
+        showToast('✅ 名字已保存');
       }
-      closeModal();
-      showToast('✅ 设置已保存');
     });
 
-    document.getElementById('sync-download').addEventListener('click', async () => {
-      statusEl.textContent = '⏳ 正在从云端下载...';
-      const data = await syncLoadFromCloud();
-      if (data && data.trips) {
-        showConfirm('从云端下载',
-          `云端有 <strong>${data.trips.length}</strong> 个旅行计划（最后更新：${data.lastUpdatedBy || '未知'}，${new Date(data.updatedAt).toLocaleString('zh-CN')}）。<br><br>这将<strong>替换</strong>你当前的本地数据，确定继续吗？`,
-          () => {
-            state.trips = data.trips;
-            state.trips.forEach(t => {
-              if (!t.packing) t.packing = defaultPackingItems(t.tripType || 'city');
-            });
-            state.activeTripId = state.trips.length > 0 ? state.trips[0].id : null;
-            if (!state.activeTripId) state.currentView = 'dashboard';
-            saveState();
-            render();
+    // Create group
+    const createBtn = document.getElementById('sync-create-group');
+    if (createBtn) {
+      createBtn.addEventListener('click', async () => {
+        document.getElementById('sync-status').textContent = '⏳ 创建中...';
+        await createGroup();
+        document.getElementById('sync-status').textContent = '✅ 协作组已创建！';
+      });
+    }
+
+    // Join group
+    const joinBtn = document.getElementById('sync-join-group');
+    if (joinBtn) {
+      joinBtn.addEventListener('click', () => {
+        const gid = prompt('请输入协作组 ID 或完整链接：');
+        if (!gid) return;
+        let cleanGid = gid.trim();
+        // Extract group ID from URL if full link pasted
+        const urlMatch = cleanGid.match(/[?&]group=([^&]+)/);
+        if (urlMatch) cleanGid = urlMatch[1];
+        document.getElementById('sync-status').textContent = '⏳ 加入中...';
+        joinGroup(cleanGid).then(() => {
+          pullGroupTrips().then(() => {
+            document.getElementById('sync-status').textContent = '✅ 已加入！';
             closeModal();
-            showToast('✅ 已从云端下载 ' + data.trips.length + ' 个旅行计划');
+            render();
           });
-      } else {
-        statusEl.textContent = '⚠️ 下载失败，请检查网络或确认云端有数据';
-      }
-    });
-
-    document.getElementById('sync-upload').addEventListener('click', async () => {
-      if (!getGithubToken()) {
-        showToast('⚠️ 请先配置 GitHub Token');
-        return;
-      }
-      if (state.trips.length === 0) {
-        showToast('⚠️ 没有可上传的旅行计划');
-        return;
-      }
-      showConfirm('上传到云端',
-        `将上传 <strong>${state.trips.length}</strong> 个旅行计划到云端共享存储。<br><br>同伴可以从云端下载获取最新数据。确定上传吗？`,
-        async () => {
-          statusEl.textContent = '⏳ 正在上传...';
-          const ok = await syncSaveToCloud();
-          if (ok) {
-            statusEl.textContent = '✅ 上传成功！同伴可以下载最新数据了';
-            showToast('✅ 已上传到云端');
-          } else {
-            statusEl.textContent = '⚠️ 上传失败，请检查 Token 或网络';
-          }
         });
-    });
+      });
+    }
+
+    // Leave group
+    const leaveBtn = document.getElementById('sync-leave-group');
+    if (leaveBtn) {
+      leaveBtn.addEventListener('click', () => {
+        showConfirm('离开协作组',
+          '离开后将不再同步数据，但你的本地数据会保留。确定离开吗？',
+          () => {
+            leaveGroup();
+            closeModal();
+          });
+      });
+    }
+
+    // Update member count and list
+    if (groupId && firebaseDB) {
+      const membersRef = firebaseDB.ref(`groups/${groupId}/members`);
+      membersRef.on('value', (snap) => {
+        const data = snap.val() || {};
+        const count = Object.keys(data).length;
+        const countEl = document.getElementById('sync-member-count');
+        if (countEl) countEl.textContent = count;
+
+        const listEl = document.getElementById('sync-member-list');
+        if (listEl) {
+          listEl.innerHTML = Object.entries(data).map(([mid, md]) => {
+            const isMe = mid === memberId;
+            const time = md.lastActive ? new Date(md.lastActive).toLocaleString('zh-CN') : '未知';
+            const tripCount = md.trips ? md.trips.length : 0;
+            return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0">
+              <span style="font-size:16px">${isMe ? '⭐' : '👤'}</span>
+              <span style="flex:1">${escHtml(md.name || '未知')}${isMe ? '（我）' : ''}</span>
+              <span style="color:var(--text-muted)">${tripCount} 个行程</span>
+            </div>`;
+          }).join('');
+        }
+      });
+    }
   }, 50);
 }
+
+// ── Auto-sync when trips change (debounced) ──
+let syncTimer = null;
+function schedulePushToFirebase() {
+  if (!isGroupMode() || !firebaseDB) return;
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    pushMyTrips().catch(() => {});
+  }, 2000); // 2 second debounce
+}
+
+// Override saveState to also push to Firebase when in group mode
+const originalSaveState = saveState;
+saveState = function() {
+  originalSaveState();
+  schedulePushToFirebase();
+};
 
 /* =============================================
    TRIP CRUD
@@ -1535,7 +1685,6 @@ function showSettingsModal() {
   const config = getLlmConfig();
   const providerModels = { deepseek: 'deepseek-chat', anthropic: 'claude-sonnet-5-20251001', openai: 'gpt-4o' };
   const providerPlaceholders = { deepseek: 'sk-...', anthropic: 'sk-ant-...', openai: 'sk-...' };
-  const githubToken = config.githubToken || '';
   const userName = config.userName || '';
   showModal('⚙️ 设置',
     `<div style="font-size:14px;font-weight:600;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)">🤖 AI 服务</div>
@@ -1556,15 +1705,9 @@ function showSettingsModal() {
       <input class="form-input" id="sm-model" value="${escHtml(config.model || '')}" placeholder="${providerModels[config.provider] || 'deepseek-chat'}">
     </div>
 
-    <div style="font-size:14px;font-weight:600;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)">☁️ 云端同步</div>
-    <div class="form-group"><label class="form-label">你的名字</label>
-      <input class="form-input" id="sm-username" value="${escHtml(userName)}" placeholder="输入名字，同伴能看到谁更新了数据">
-    </div>
-    <div class="form-group"><label class="form-label">GitHub Token</label>
-      <input class="form-input" type="password" id="sm-gh-token" value="${escHtml(githubToken)}" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
-        🔑 在 <a href="https://github.com/settings/tokens" target="_blank">GitHub Settings → Developer settings → Personal access tokens</a> 创建，勾选 <strong>repo</strong> 权限即可
-      </div>
+    <div style="font-size:14px;font-weight:600;margin:20px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)">👤 个人信息</div>
+    <div class="form-group"><label class="form-label">我的名字（协作时显示）</label>
+      <input class="form-input" id="sm-username" value="${escHtml(userName)}" placeholder="输入你的名字">
     </div>
     <div id="sm-error" class="form-error" style="display:none"></div>`,
     `<button class="btn btn-secondary" onclick="closeModal()">取消</button>
@@ -1576,20 +1719,18 @@ function showSettingsModal() {
       const apiKey = document.getElementById('sm-api-key').value.trim();
       const provider = document.getElementById('sm-provider').value;
       const model = document.getElementById('sm-model').value.trim() || (providerModels[provider] || 'deepseek-chat');
-      const ghToken = document.getElementById('sm-gh-token').value.trim();
       const userName = document.getElementById('sm-username').value.trim();
 
       saveLlmConfig({
         provider: provider,
         apiKey: apiKey,
         model: model,
-        githubToken: ghToken || config.githubToken || '',
         userName: userName || config.userName || '',
       });
       closeModal(); showToast('✅ 设置已保存');
     });
     document.getElementById('sm-clear').addEventListener('click', () => {
-      saveLlmConfig({ provider: 'deepseek', apiKey: '', model: 'deepseek-chat', githubToken: '', userName: '' });
+      saveLlmConfig({ provider: 'deepseek', apiKey: '', model: 'deepseek-chat', userName: '' });
       closeModal(); showToast('🗑️ 设置已清除');
     });
   }, 50);
@@ -2371,7 +2512,9 @@ function renderDashboard(main) {
       </div>
       <button class="btn btn-primary" onclick="showTripForm()">✈️ 新建旅行</button>
     </div>
-    <div class="trip-grid">${tripCardsHtml}</div>`;
+    <div class="trip-grid">${tripCardsHtml}</div>
+
+    ${isGroupMode() ? renderGroupMembersSection() : ''}`;
 
   // Async: load photos for trip cards
   state.trips.forEach(trip => {
@@ -2389,6 +2532,69 @@ function renderDashboard(main) {
       }
     }).catch(() => {});
   });
+}
+
+function renderGroupMembersSection() {
+  const remoteTrips = state.remoteTrips || {};
+  const members = state.groupMembers || {};
+  const entries = Object.entries(remoteTrips);
+
+  if (entries.length === 0) {
+    return `
+      <div style="margin-top:32px">
+        <h2 style="font-size:18px;margin-bottom:8px">👥 组成员的行程</h2>
+        <div class="card" style="text-align:center;padding:32px;color:var(--text-muted)">
+          <div style="font-size:32px;margin-bottom:8px">📭</div>
+          <p>暂无其他成员的行程</p>
+          <p style="font-size:12px">等待同伴加入并发布行程...</p>
+        </div>
+      </div>`;
+  }
+
+  const memberCards = entries.map(([mid, mdata]) => {
+    const trips = mdata.trips || [];
+    const name = mdata.name || '未知';
+    const active = mdata.lastActive ? new Date(mdata.lastActive).toLocaleDateString('zh-CN') : '';
+
+    if (trips.length === 0) {
+      return `<div class="card" style="padding:20px;text-align:center;opacity:0.6">
+        <div style="font-size:24px;margin-bottom:4px">👤</div>
+        <div style="font-weight:600">${escHtml(name)}</div>
+        <div style="font-size:11px;color:var(--text-muted)">暂无行程</div>
+      </div>`;
+    }
+
+    return trips.map(trip => {
+      const days = Object.keys(trip.itinerary || {}).length;
+      const activityCount = Object.values(trip.itinerary || {}).reduce((sum, acts) => sum + acts.length, 0);
+      return `
+        <div class="card trip-card" style="opacity:0.85;border-left:3px solid var(--info)">
+          <div class="trip-card-header" style="background:linear-gradient(135deg, #6b8ba4, #8db3c9)">
+            <div class="trip-card-badge">${days} 天</div>
+            <div>
+              <div class="trip-card-title">${escHtml(trip.name)}</div>
+              <div style="font-size:11px;color:rgba(255,255,255,0.8)">👤 ${escHtml(name)}</div>
+            </div>
+          </div>
+          <div class="trip-card-body">
+            <div class="trip-card-dates">📅 ${formatDate(trip.startDate)} → ${formatDate(trip.endDate)}</div>
+            <div class="trip-card-meta">
+              <span>📋 ${activityCount} 个活动</span>
+              <span>👥 ${trip.travelers || 1} 人</span>
+              <span>📌 ${escHtml(name)}</span>
+            </div>
+            ${trip.notes ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:8px">💬 ${escHtml(trip.notes)}</div>` : ''}
+          </div>
+        </div>`;
+    }).join('');
+  }).join('');
+
+  return `
+    <div style="margin-top:32px">
+      <h2 style="font-size:18px;margin-bottom:4px">👥 组成员的行程</h2>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:16px">只读 · 点击你自己的行程进行编辑</p>
+      <div class="trip-grid">${memberCards}</div>
+    </div>`;
 }
 
 function selectTrip(tripId) {
@@ -2978,12 +3184,35 @@ function renderPacking(main, trip) {
    ============================================= */
 render();
 
+// Auto-join group from URL parameter
+(function autoJoinGroup() {
+  const gid = getGroupIdFromURL();
+  if (gid && initFirebase()) {
+    console.log('👥 检测到协作组链接，自动加入...');
+    joinGroup(gid).then(() => {
+      pullGroupTrips().then(() => {
+        console.log('✅ 已加入协作组，成员行程已加载');
+        state.currentView = 'dashboard';
+        render();
+      });
+    }).catch(() => {
+      console.log('⚠️ 加入协作组失败，使用个人模式');
+    });
+  } else if (gid) {
+    console.log('⚠️ URL 包含协作组链接，但 Firebase 未配置');
+  }
+})();
+
 console.log('🌍 旅行规划器 Pro 已就绪');
+if (isGroupMode()) {
+  console.log('  👥 协作模式 — 组成员实时同步');
+} else {
+  console.log('  👤 个人模式 — 数据保存在本地');
+}
 console.log('  📖 Wikipedia 目的地介绍');
 console.log('  🌤️ Open-Meteo 天气预报');
 console.log('  📸 目的地风景照片');
 console.log('  💡 智能行程推荐');
-console.log('  所有API免费使用，无需注册');
 </script>
 </body>
 </html>
